@@ -19,6 +19,10 @@ DOBBY_DIR = Path(".dobby")
 TASK_DIR = DOBBY_DIR / TASK_NAME
 TEAM_TASKS = ["smoke-team-a", "smoke-team-b"]
 CONVERGE_TASK = "smoke-converge"
+HITL_T1_TASK = "smoke-hitl-t1"
+HITL_T2_TASK = "smoke-hitl-t2"
+HITL_T3_TASK = "smoke-hitl-t3"
+HITL_STOP_TASK = "smoke-hitl-stop"
 
 
 def run(cmd, **kwargs):
@@ -33,7 +37,7 @@ def cleanup():
         cost_file.unlink()
     run(f"tmux kill-session -t dobby-{TASK_NAME} 2>/dev/null")
     # Clean up multi-agent team tasks and convergence task
-    all_slugs = [TASK_NAME] + TEAM_TASKS + [CONVERGE_TASK]
+    all_slugs = [TASK_NAME] + TEAM_TASKS + [CONVERGE_TASK] + [HITL_T1_TASK, HITL_T2_TASK, HITL_T3_TASK, HITL_STOP_TASK]
     for slug in TEAM_TASKS + [CONVERGE_TASK]:
         team_dir = DOBBY_DIR / slug
         if team_dir.exists():
@@ -57,6 +61,14 @@ def cleanup():
     comp_cost = Path("/tmp/dobby_cmd_comp-test_output.txt")
     if comp_cost.exists():
         comp_cost.unlink()
+    # Clean up HITL tier test artifacts
+    for hitl_task in [HITL_T1_TASK, HITL_T2_TASK, HITL_T3_TASK, HITL_STOP_TASK]:
+        hitl_dir = DOBBY_DIR / hitl_task
+        if hitl_dir.exists():
+            shutil.rmtree(hitl_dir)
+        run(f"tmux kill-session -t dobby-{hitl_task} 2>/dev/null")
+        # Note: do NOT send -S signals here — killing the session is enough.
+        # Sending -S creates stale signals that interfere with the next test run.
     roster = DOBBY_DIR / "records" / "roster.md"
     if roster.exists():
         lines = roster.read_text().splitlines()
@@ -622,6 +634,158 @@ EOF
         bot_comp_ok = False
         print(f"    Bot completion test error: {e}")
     results.append(("Bot completion", bot_comp_ok))
+
+    # 16. Tier 1: decision logging — agent writes DECISIONS.md, no blocking
+    t1_dir = DOBBY_DIR / HITL_T1_TASK
+    os.makedirs(t1_dir / "records", exist_ok=True)
+    os.makedirs(t1_dir / "output", exist_ok=True)
+    t1_script = t1_dir / "_mock.sh"
+    t1_script.write_text(f"""#!/bin/bash
+cd {t1_dir.resolve()}
+mkdir -p records output
+# Tier 1: log decision without blocking
+echo "| Using SQLite | Simplest for this prototype | $(date +%Y-%m-%d) |" >> records/DECISIONS.md
+echo "| Skip auth | Out of scope for smoke test | $(date +%Y-%m-%d) |" >> records/DECISIONS.md
+echo "Tier1 complete" > output/result.md
+""")
+    t1_script.chmod(0o755)
+    run(f"tmux new-session -d -s dobby-{HITL_T1_TASK}")
+    run(f"tmux send-keys -t dobby-{HITL_T1_TASK} 'bash {t1_script.resolve()} ; tmux wait-for -S dobby_{HITL_T1_TASK}_done' Enter")
+    t1_start = time.time()
+    r = run(f"timeout 10 tmux wait-for dobby_{HITL_T1_TASK}_done")
+    t1_elapsed = time.time() - t1_start
+    decisions_md = t1_dir / "records" / "DECISIONS.md"
+    tier1_ok = (
+        r.returncode == 0
+        and t1_elapsed < 9  # completed quickly (no blocking)
+        and decisions_md.exists()
+        and "SQLite" in decisions_md.read_text()
+        and (t1_dir / "output" / "result.md").exists()
+    )
+    run(f"tmux kill-session -t dobby-{HITL_T1_TASK} 2>/dev/null")
+    results.append(("Tier 1 decision logging", tier1_ok))
+
+    # 17. Tier 2: checkpoint + INBOX.md pickup
+    t2_dir = DOBBY_DIR / HITL_T2_TASK
+    os.makedirs(t2_dir / "records", exist_ok=True)
+    os.makedirs(t2_dir / "output", exist_ok=True)
+    t2_script = t2_dir / "_mock.sh"
+    t2_script.write_text(f"""#!/bin/bash
+cd {t2_dir.resolve()}
+mkdir -p records output
+# Tier 2: write checkpoint and signal
+echo "Planning complete. Ready for review." > records/CHECKPOINT.md
+tmux wait-for -S dobby_{HITL_T2_TASK}_checkpoint
+# Short wait (5s instead of 60s for test speed)
+sleep 5
+# Read INBOX.md if present
+INBOX=""
+if [ -f records/INBOX.md ]; then
+  INBOX=$(cat records/INBOX.md)
+  rm records/INBOX.md
+fi
+echo "Checkpoint complete. Inbox: $INBOX" > output/result.md
+""")
+    t2_script.chmod(0o755)
+    run(f"tmux new-session -d -s dobby-{HITL_T2_TASK}")
+    run(f"tmux send-keys -t dobby-{HITL_T2_TASK} 'bash {t2_script.resolve()} ; tmux wait-for -S dobby_{HITL_T2_TASK}_done' Enter")
+    # Wait for checkpoint signal, write INBOX.md, verify agent incorporates it
+    r_cp = run(f"timeout 10 tmux wait-for dobby_{HITL_T2_TASK}_checkpoint")
+    if r_cp.returncode == 0:
+        (t2_dir / "records" / "INBOX.md").write_text("[2026-02-26 10:00] Please use PostgreSQL instead of SQLite.\n")
+    r_t2 = run(f"timeout 15 tmux wait-for dobby_{HITL_T2_TASK}_done")
+    result_txt = ""
+    result_path = t2_dir / "output" / "result.md"
+    if result_path.exists():
+        result_txt = result_path.read_text()
+    tier2_ok = (
+        r_cp.returncode == 0  # checkpoint signal was received
+        and r_t2.returncode == 0  # agent completed
+        and "PostgreSQL" in result_txt  # agent read INBOX.md
+    )
+    run(f"tmux kill-session -t dobby-{HITL_T2_TASK} 2>/dev/null")
+    results.append(("Tier 2 checkpoint + INBOX", tier2_ok))
+
+    # 18. Tier 3: backward compat + auto-timeout graceful degradation
+    t3_dir = DOBBY_DIR / HITL_T3_TASK
+    os.makedirs(t3_dir / "records", exist_ok=True)
+    os.makedirs(t3_dir / "output", exist_ok=True)
+    t3_script = t3_dir / "_mock.sh"
+    t3_script.write_text(f"""#!/bin/bash
+cd {t3_dir.resolve()}
+mkdir -p records output
+# Tier 3: ask a question, but time out gracefully if no answer in 5s (shortened for test)
+echo "Need credentials for the database." > records/QUESTION.md
+tmux wait-for -S dobby_{HITL_T3_TASK}_question
+timeout 5 tmux wait-for dobby_{HITL_T3_TASK}_answer || true
+ANSWER=$(cat records/ANSWER.md 2>/dev/null || echo "timed-out-proceeding-with-default")
+rm -f records/QUESTION.md records/ANSWER.md
+echo "Result: $ANSWER" > output/result.md
+""")
+    t3_script.chmod(0o755)
+    run(f"tmux new-session -d -s dobby-{HITL_T3_TASK}")
+    run(f"tmux send-keys -t dobby-{HITL_T3_TASK} 'bash {t3_script.resolve()} ; tmux wait-for -S dobby_{HITL_T3_TASK}_done' Enter")
+    # Wait for question signal
+    r_q = run(f"timeout 10 tmux wait-for dobby_{HITL_T3_TASK}_question")
+    # Do NOT answer — simulate timeout scenario (agent should proceed after 5s)
+    r_t3 = run(f"timeout 15 tmux wait-for dobby_{HITL_T3_TASK}_done")
+    result_path_t3 = t3_dir / "output" / "result.md"
+    result_txt_t3 = result_path_t3.read_text() if result_path_t3.exists() else ""
+    tier3_ok = (
+        r_q.returncode == 0  # question signal was sent (backward compat protocol works)
+        and r_t3.returncode == 0  # agent completed (graceful degradation after timeout)
+        and "timed-out-proceeding-with-default" in result_txt_t3  # used fallback
+    )
+    run(f"tmux kill-session -t dobby-{HITL_T3_TASK} 2>/dev/null")
+    results.append(("Tier 3 backward compat + timeout", tier3_ok))
+
+    # 19. Tier 2 → Tier 3 STOP escalation: STOP file causes agent to write QUESTION.md
+    stop_dir = DOBBY_DIR / HITL_STOP_TASK
+    os.makedirs(stop_dir / "records", exist_ok=True)
+    os.makedirs(stop_dir / "output", exist_ok=True)
+    stop_script = stop_dir / "_mock.sh"
+    stop_script.write_text(f"""#!/bin/bash
+cd {stop_dir.resolve()}
+mkdir -p records output
+# Tier 2: write checkpoint and signal
+echo "Core work complete. Awaiting review." > records/CHECKPOINT.md
+tmux wait-for -S dobby_{HITL_STOP_TASK}_checkpoint
+# Poll for STOP file (up to 10s)
+for i in $(seq 1 10); do
+  if [ -f records/STOP ]; then
+    # Escalate to Tier 3: write QUESTION.md as specified in protocol
+    echo "Human requested a pause via STOP file. Awaiting instructions." > records/QUESTION.md
+    tmux wait-for -S dobby_{HITL_STOP_TASK}_question
+    # Wait for answer (or short timeout)
+    timeout 5 tmux wait-for dobby_{HITL_STOP_TASK}_answer || true
+    rm -f records/STOP records/QUESTION.md records/ANSWER.md
+    break
+  fi
+  sleep 1
+done
+echo "STOP escalation test complete" > output/result.md
+""")
+    stop_script.chmod(0o755)
+    run(f"tmux new-session -d -s dobby-{HITL_STOP_TASK}")
+    run(f"tmux send-keys -t dobby-{HITL_STOP_TASK} 'bash {stop_script.resolve()} ; tmux wait-for -S dobby_{HITL_STOP_TASK}_done' Enter")
+    # Orchestrator: wait for checkpoint signal, then create STOP file
+    r_cp = run(f"timeout 10 tmux wait-for dobby_{HITL_STOP_TASK}_checkpoint")
+    if r_cp.returncode == 0:
+        (stop_dir / "records" / "STOP").touch()
+    # Wait for question signal — agent should detect STOP and escalate to Tier 3
+    r_q = run(f"timeout 15 tmux wait-for dobby_{HITL_STOP_TASK}_question")
+    question_md = stop_dir / "records" / "QUESTION.md"
+    question_content = question_md.read_text() if question_md.exists() else ""
+    # Signal answer so agent can exit cleanly
+    run(f"tmux wait-for -S dobby_{HITL_STOP_TASK}_answer 2>/dev/null || true")
+    run(f"timeout 10 tmux wait-for dobby_{HITL_STOP_TASK}_done")
+    stop_ok = (
+        r_cp.returncode == 0        # checkpoint signal was received
+        and r_q.returncode == 0     # agent escalated to Tier 3 (question signal fired)
+        and "STOP" in question_content.upper()  # QUESTION.md mentions STOP
+    )
+    run(f"tmux kill-session -t dobby-{HITL_STOP_TASK} 2>/dev/null")
+    results.append(("Tier 2 STOP escalation", stop_ok))
 
     # Results
     elapsed = time.time() - total_start

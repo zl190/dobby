@@ -21,6 +21,8 @@ Dobby is a free elf. Give Dobby a task and Dobby works on it autonomously in the
 /dobby deliver <task-name>           # Read output and present results
 /dobby roster                        # Show project agent roster (from .dobby/roster-config.md)
 /dobby roster init                   # Create a starter .dobby/roster-config.md
+/dobby tell <task-name> "message"    # Send async message to a running task (Tier 2 inbox)
+/dobby tell <task-name> STOP         # Signal agent to pause at next Tier 2 checkpoint (escalate to Tier 3)
 ```
 
 ## First Run: Bootstrap `.dobby/`
@@ -203,18 +205,36 @@ Write a `${TASK_DIR}/CLAUDE.md` tailored to the task. Include:
 2. **Mission**: what Dobby should deliver (from user's request)
 3. **Success criteria**: what "done" looks like
 4. **Budget**: the cap
-5. **Human-in-the-loop protocol**: (copy this exactly)
+5. **Human-in-the-loop protocol**: (copy this exactly, replacing TASKNAME with the actual task name slug)
    ```
-   ## Asking for Help
-   If you need something you cannot do yourself (e.g., scan a QR code, approve a payment,
-   provide credentials, make a judgment call), do this:
+   ## Human-in-the-loop Protocol
+
+   ### Tier 1 (DEFAULT — non-blocking)
+   For all routine decisions, make your best judgment and log it to `records/DECISIONS.md`:
+   ```
+   | <Decision> | <Rationale> | <Date> |
+   ```
+   No blocking. Continue immediately.
+
+   ### Tier 2 (checkpoint — phase transitions)
+   At major phase transitions (planning complete, core work done, before final delivery):
+   1. Write a brief summary to `records/CHECKPOINT.md`
+   2. Signal: `tmux wait-for -S dobby_TASKNAME_checkpoint`
+   3. Wait: `sleep 60`
+   4. If `records/INBOX.md` has content, read and incorporate it, then delete it
+   5. If `records/STOP` exists:
+      - Write to `records/QUESTION.md`: "Human requested a pause via STOP file. Awaiting instructions."
+      - Escalate: follow Tier 3 steps 2–5 (signal, wait, read answer, delete files)
+   6. Continue working
+
+   ### Tier 3 (hard block — rare)
+   ONLY for: credentials needed, QR codes to scan, physical actions required, deploying to production infrastructure, modifying files outside output/.
    1. Write your question to `records/QUESTION.md` — explain what you need and why
    2. Run: `tmux wait-for -S dobby_TASKNAME_question`
-   3. Run: `tmux wait-for dobby_TASKNAME_answer` (this blocks until the user responds)
-   4. Read the answer from `records/ANSWER.md`
+   3. Run: `timeout 1800 tmux wait-for dobby_TASKNAME_answer || echo "Timed out after 30min, proceeding with best judgment"`
+   4. Read the answer from `records/ANSWER.md` (if it exists)
    5. Delete both files and continue working
    ```
-   Replace TASKNAME with the actual task name slug.
 5. **State management**: "Track progress in `records/TODO.md`. Write deliverables to `output/`."
 6. **Constraints**: from user's request or "None specified"
 
@@ -248,6 +268,23 @@ The timeout is ~12 minutes per dollar of budget. If the timeout fires, check `tm
 ```bash
 while true; do tmux wait-for dobby_${TASK_NAME}_question 2>/dev/null || break; echo "QUESTION_RECEIVED"; break; done
 ```
+
+**Checkpoint listener (non-blocking, optional):**
+```bash
+while true; do
+  tmux wait-for dobby_${TASK_NAME}_checkpoint 2>/dev/null || break
+  SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
+  SUMMARY=$(cat ".dobby/${TASK_NAME}/records/CHECKPOINT.md" 2>/dev/null | head -3 || echo "Checkpoint reached")
+  uv run "${SKILL_DIR}/notify/webhook.py" checkpoint --task "${TASK_NAME}" --summary "${SUMMARY}" 2>/dev/null || true
+  # Also dispatch the latest decision logged in DECISIONS.md (non-blocking, fire-and-forget)
+  LATEST_DECISION=$(tail -1 ".dobby/${TASK_NAME}/records/DECISIONS.md" 2>/dev/null | tr -d '|' | xargs || true)
+  if [ -n "${LATEST_DECISION}" ]; then
+    uv run "${SKILL_DIR}/notify/webhook.py" decision --task "${TASK_NAME}" --decision "${LATEST_DECISION}" --rationale "see records/DECISIONS.md" 2>/dev/null || true
+  fi
+  # Non-blocking: re-arm loop continues — agent is not interrupted by this listener
+done
+```
+Note: this listener does NOT signal back. The agent continues after its `sleep 60` regardless.
 
 When the completion listener fires → Dobby is done. First, cancel the pending question listener so it does not block forever (the agent may have finished without asking any questions):
 ```bash
@@ -547,7 +584,7 @@ SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/sk
 uv run "${SKILL_DIR}/notify/webhook.py" <event_type> <args> 2>/dev/null || true
 ```
 
-Events: `completed`, `question`, `convergence`, `team_done`, `command`
+Events: `completed`, `question`, `convergence`, `team_done`, `command`, `decision`, `checkpoint`
 
 ### Command Interface (Remote Control)
 
@@ -578,6 +615,31 @@ When both convergence and multi-domain are triggered (e.g., `/dobby --converge "
 - Convergence does NOT apply to individual subtasks in this mode
 - After ALL subtasks complete, a single convergence pass runs on the combined output if `--converge` was explicitly passed
 - This prevents combinatorial explosion (N subtasks x M iterations each)
+
+## Tell Command
+
+When the user runs `/dobby tell <task-name> "message"`:
+
+1. Resolve the task directory: `TASK_DIR=".dobby/${TASK_NAME}"`
+2. If `${TASK_DIR}` does not exist, tell the user: "No task named {task-name} found."
+3. Append the message to `${TASK_DIR}/records/INBOX.md`:
+   ```bash
+   echo "[$(date '+%Y-%m-%d %H:%M')] ${MESSAGE}" >> "${TASK_DIR}/records/INBOX.md"
+   ```
+4. Tell the user: "Message delivered to {task-name}. Dobby will pick it up at the next checkpoint."
+
+The agent will read `records/INBOX.md` during its next Tier 2 checkpoint and incorporate any messages.
+
+**Special case: STOP signal**
+
+If the message is exactly `STOP` (case-insensitive), instead of appending to INBOX.md:
+1. Create `${TASK_DIR}/records/STOP`:
+   ```bash
+   touch "${TASK_DIR}/records/STOP"
+   ```
+2. Tell the user: "STOP signal sent to {task-name}. Dobby will pause and ask for instructions at the next checkpoint."
+
+The agent will detect `records/STOP` during its Tier 2 checkpoint and escalate to Tier 3, writing: "Human requested a pause via STOP file. Awaiting instructions." to `records/QUESTION.md`.
 
 ## Stop Command
 

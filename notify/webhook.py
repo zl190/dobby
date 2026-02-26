@@ -16,7 +16,7 @@ from notify.config import NotifyConfig, load_config
 from notify.events import (
     EventType, NotifyEvent,
     completed_event, question_event, convergence_event, team_done_event,
-    command_event,
+    command_event, decision_event, checkpoint_event,
 )
 
 
@@ -30,6 +30,8 @@ def format_slack_payload(event: NotifyEvent) -> dict:
         EventType.CONVERGENCE: ":chart_with_upwards_trend:",
         EventType.TEAM_DONE: ":tada:",
         EventType.COMMAND: ":zap:",
+        EventType.DECISION: ":bulb:",
+        EventType.CHECKPOINT: ":stopwatch:",
     }
     emoji = emoji_map.get(event.event_type, ":robot_face:")
     blocks.append({
@@ -89,6 +91,18 @@ def format_slack_payload(event: NotifyEvent) -> dict:
             f"*Platform:* {meta.get('platform', '?')}"
         )}})
 
+    elif event.event_type == EventType.DECISION:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"*Decision:* {meta.get('decision', 'N/A')}\n"
+            f"*Rationale:* {meta.get('rationale', 'N/A')}"
+        )}})
+
+    elif event.event_type == EventType.CHECKPOINT:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": (
+            f"*Phase:* {meta.get('iteration', '?')}\n"
+            f"*Summary:* {meta.get('summary', 'N/A')}"
+        )}})
+
     return {"blocks": blocks}
 
 
@@ -100,6 +114,8 @@ def format_discord_payload(event: NotifyEvent) -> dict:
         EventType.CONVERGENCE: 0x3498DB,
         EventType.TEAM_DONE: 0x9B59B6,
         EventType.COMMAND: 0xE67E22,
+        EventType.DECISION: 0x1ABC9C,
+        EventType.CHECKPOINT: 0x95A5A6,
     }
 
     embed = {
@@ -145,6 +161,18 @@ def format_discord_payload(event: NotifyEvent) -> dict:
             {"name": "Request", "value": meta.get("request", "N/A"), "inline": False},
             {"name": "User", "value": meta.get("user", "?"), "inline": True},
             {"name": "Platform", "value": meta.get("platform", "?"), "inline": True},
+        ])
+
+    elif event.event_type == EventType.DECISION:
+        embed["fields"].extend([
+            {"name": "Decision", "value": meta.get("decision", "N/A"), "inline": False},
+            {"name": "Rationale", "value": meta.get("rationale", "N/A"), "inline": False},
+        ])
+
+    elif event.event_type == EventType.CHECKPOINT:
+        embed["fields"].extend([
+            {"name": "Phase", "value": str(meta.get("iteration", "?")), "inline": True},
+            {"name": "Summary", "value": meta.get("summary", "N/A"), "inline": False},
         ])
 
     return {"embeds": [embed]}
@@ -197,7 +225,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Dobby webhook notifier")
-    parser.add_argument("event_type", choices=["completed", "question", "convergence", "team_done", "command"])
+    parser.add_argument("event_type", choices=["completed", "question", "convergence", "team_done", "command", "decision", "checkpoint"])
     parser.add_argument("--task", required=True)
     parser.add_argument("--cost", type=float, default=0.0)
     parser.add_argument("--output-dir", default="")
@@ -212,6 +240,8 @@ def main():
     parser.add_argument("--trajectory", default="")  # comma-separated scores
     parser.add_argument("--user", default="unknown")
     parser.add_argument("--platform", default="cli")
+    parser.add_argument("--rationale", default="")
+    parser.add_argument("--summary", default="")
     args = parser.parse_args()
 
     event_builders = {
@@ -226,6 +256,8 @@ def main():
             args.total_cost, args.request
         ),
         "command": lambda: command_event(args.task, args.request, args.user, args.platform),
+        "decision": lambda: decision_event(args.task, args.decision, args.rationale),
+        "checkpoint": lambda: checkpoint_event(args.task, args.summary, args.iteration),
     }
 
     event = event_builders[args.event_type]()

@@ -10,6 +10,8 @@ class EventType(Enum):
     CONVERGENCE = "convergence"
     TEAM_DONE = "team_done"
     COMMAND = "command"
+    DECISION = "decision"
+    CHECKPOINT = "checkpoint"
 
 
 @dataclass
@@ -68,4 +70,22 @@ def command_event(task_name: str, request: str, user: str, platform: str) -> Not
         task_name=task_name,
         message=f"Dobby command from {platform}: {request}",
         metadata={"request": request, "user": user, "platform": platform},
+    )
+
+
+def decision_event(task_name: str, decision: str, rationale: str) -> NotifyEvent:
+    return NotifyEvent(
+        event_type=EventType.DECISION,
+        task_name=task_name,
+        message=f"Dobby decided: {decision}",
+        metadata={"decision": decision, "rationale": rationale},
+    )
+
+
+def checkpoint_event(task_name: str, summary: str, iteration: int = 0) -> NotifyEvent:
+    return NotifyEvent(
+        event_type=EventType.CHECKPOINT,
+        task_name=task_name,
+        message=f"Dobby checkpoint: {task_name} (phase {iteration})",
+        metadata={"summary": summary, "iteration": iteration},
     )
