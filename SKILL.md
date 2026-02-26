@@ -3,7 +3,6 @@ name: dobby
 description: Summon Dobby to work on substantial tasks autonomously in the background. Use when the user wants to delegate a project (research paper, build an app, design a system) to an autonomous agent that works while they do other things. Triggers on "dobby", "summon", "cast", "delegate project", "run in background", "work on this while I".
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, WebSearch, WebFetch
 ---
-
 # Dobby
 
 Dobby is a free elf. Give Dobby a task and Dobby works on it autonomously in the background while you do other things. Each task gets its own folder, CLAUDE.md, convergence loop, and budget cap.
@@ -53,9 +52,7 @@ Not everything needs a background agent. Classify first, route second:
 | **Project** (hours/days) | Dobby works on it in tmux | Research paper, build an app, design a system |
 | **Multi-domain** | Multiple tasks in parallel | "Build an app AND write docs" |
 
-**Default to the lightest route.** Only launch a background agent when the task genuinely needs autonomous multi-step work with its own convergence loop.
-
-For Quick and Task classifications: just do the work directly (or via Task tool).
+**Default to the lightest route.** For Quick and Task: do the work directly (or via Task tool).
 
 ### Roster-Aware Routing (for Project classification)
 
@@ -209,6 +206,11 @@ Write a `${TASK_DIR}/CLAUDE.md` tailored to the task. Include:
    ```
    ## Human-in-the-loop Protocol
 
+   **Tier selection:**
+   - Need credentials, QR scan, physical action, deploy to prod, or modify files outside output/? -> Tier 3
+   - At a phase transition (planning done, core work done, pre-delivery)? -> Tier 2
+   - Everything else -> Tier 1 (DEFAULT: log and continue)
+
    ### Tier 1 (DEFAULT — non-blocking)
    For all routine decisions, make your best judgment and log it to `records/DECISIONS.md`:
    ```
@@ -272,7 +274,7 @@ while true; do tmux wait-for dobby_${TASK_NAME}_question 2>/dev/null || break; e
 **Checkpoint listener (non-blocking, optional):**
 ```bash
 while true; do
-  tmux wait-for dobby_${TASK_NAME}_checkpoint 2>/dev/null || break
+  tmux wait-for dobby_${TASK_NAME}_checkpoint 2>/dev/null || { sleep 2; continue; }
   SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
   SUMMARY=$(cat ".dobby/${TASK_NAME}/records/CHECKPOINT.md" 2>/dev/null | head -3 || echo "Checkpoint reached")
   uv run "${SKILL_DIR}/notify/webhook.py" checkpoint --task "${TASK_NAME}" --summary "${SUMMARY}" 2>/dev/null || true
@@ -284,7 +286,6 @@ while true; do
   # Non-blocking: re-arm loop continues — agent is not interrupted by this listener
 done
 ```
-Note: this listener does NOT signal back. The agent continues after its `sleep 60` regardless.
 
 When the completion listener fires → Dobby is done. First, cancel the pending question listener so it does not block forever (the agent may have finished without asking any questions):
 ```bash
@@ -498,10 +499,10 @@ When the loop finishes (ship decision):
 
 | Condition | Action |
 |---|---|
-| Last 3 scores within +/-0.5 (plateau) | Launch one-shot advisory agent: `claude -p "Read records/version_registry.md and records/EVAL_RESULT_v${N}.json. The score has plateaued. Diagnose why. What is the binding constraint? Write analysis to records/ADVISORY.md."` Include ADVISORY.md in next EVAL_FEEDBACK. |
-| Score consistently high (>8) but orchestrator spot-checks output and finds issues | Upgrade quality: switch quality model to a stronger model, or add a second quality agent with a different rubric and average scores. |
-| Advisory says "structural problem" on 2 consecutive passes | Launch parallel variants: copy output/ to `variants/a/` and `variants/b/`. Run production on each with different strategies. Evaluate both. Pick winner. |
-| Total cost > 60% of budget AND score < 50% of target | Escalate to user: "Spent ${X} of ${BUDGET}, score is ${S}. Continue or stop?" |
+| Last 3 scores within +/-0.5 (plateau) | Launch advisory agent to diagnose binding constraint. Include `records/ADVISORY.md` in next EVAL_FEEDBACK. |
+| Score >8 but output has issues | Upgrade quality model or add second quality agent with different rubric. |
+| Advisory says "structural problem" 2x | Launch parallel variant strategies. Evaluate both. Pick winner. |
+| Cost > 60% budget AND score < 50% target | Escalate to user: "Spent ${X} of ${BUDGET}, score is ${S}. Continue or stop?" |
 
 ### Session Resumption (after context compaction)
 
@@ -514,7 +515,6 @@ On session start or after compaction, if a convergence task exists:
 ## Status Command
 
 When the user runs `/dobby status`:
-
 1. Read `.dobby/records/roster.md` for all tasks
 2. Run `tmux list-sessions` to check which are still alive
 3. For each active task, read `.dobby/{name}/records/TODO.md` for latest progress
@@ -578,43 +578,25 @@ When the user runs `/dobby notify`:
 
 ### Hook Points
 
-Notification hooks are fire-and-forget. If the webhook fails, the calling protocol continues normally. All hooks use:
+All notification hooks are fire-and-forget (`2>/dev/null || true`). Webhook failure never blocks callers:
 ```bash
 SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
 uv run "${SKILL_DIR}/notify/webhook.py" <event_type> <args> 2>/dev/null || true
 ```
-
 Events: `completed`, `question`, `convergence`, `team_done`, `command`, `decision`, `checkpoint`
 
 ### Command Interface (Remote Control)
 
-When the relay daemon runs with `--enable-commands`, users can launch Dobby tasks directly from Slack or Discord:
-
-**Trigger:** Any message starting with `dobby ` (e.g., "dobby build a REST API")
-
-**Flow:**
-1. Bot receives the message in the configured channel
-2. Validates the user is in `authorized_users` (if set)
-3. Slugifies the request into a task name
-4. Launches a tmux session (`dobby-cmd-{slug}`) running `claude -p` with the Dobby skill
-5. Posts a confirmation embed/message back to the channel
-6. Completion/question notifications flow back through the normal webhook/relay system
-
-**Starting the daemon:**
+When the relay daemon runs with `--enable-commands`, users can trigger tasks from Slack/Discord. Any message starting with `dobby ` (e.g., "dobby build a REST API") is validated against `authorized_users`, slugified, and launched in a tmux session (`dobby-cmd-{slug}`). Start the daemon:
 ```bash
 SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
 cd /path/to/project && uv run "${SKILL_DIR}/notify/relay.py" daemon --enable-commands &
 ```
-
-**Security:** Only `authorized_users` can trigger commands. Without this config, any channel member can launch tasks. The daemon runs on your dev machine — tasks execute locally with your permissions.
+Security: Only `authorized_users` can trigger commands. Tasks execute locally with your permissions.
 
 ### Convergence + Multi-Domain Interaction
 
-When both convergence and multi-domain are triggered (e.g., `/dobby --converge "build an API AND write docs"`):
-- Each subtask is decomposed and launched independently as in multi-domain
-- Convergence does NOT apply to individual subtasks in this mode
-- After ALL subtasks complete, a single convergence pass runs on the combined output if `--converge` was explicitly passed
-- This prevents combinatorial explosion (N subtasks x M iterations each)
+When both flags are active: subtasks run independently (no per-subtask convergence). After ALL complete, a single convergence pass runs on the combined output. This prevents N x M combinatorial explosion.
 
 ## Tell Command
 
@@ -628,8 +610,6 @@ When the user runs `/dobby tell <task-name> "message"`:
    ```
 4. Tell the user: "Message delivered to {task-name}. Dobby will pick it up at the next checkpoint."
 
-The agent will read `records/INBOX.md` during its next Tier 2 checkpoint and incorporate any messages.
-
 **Special case: STOP signal**
 
 If the message is exactly `STOP` (case-insensitive), instead of appending to INBOX.md:
@@ -638,8 +618,6 @@ If the message is exactly `STOP` (case-insensitive), instead of appending to INB
    touch "${TASK_DIR}/records/STOP"
    ```
 2. Tell the user: "STOP signal sent to {task-name}. Dobby will pause and ask for instructions at the next checkpoint."
-
-The agent will detect `records/STOP` during its Tier 2 checkpoint and escalate to Tier 3, writing: "Human requested a pause via STOP file. Awaiting instructions." to `records/QUESTION.md`.
 
 ## Stop Command
 

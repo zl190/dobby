@@ -676,8 +676,8 @@ mkdir -p records output
 # Tier 2: write checkpoint and signal
 echo "Planning complete. Ready for review." > records/CHECKPOINT.md
 tmux wait-for -S dobby_{HITL_T2_TASK}_checkpoint
-# Short wait (5s instead of 60s for test speed)
-sleep 5
+# Shortened grace period for test (protocol specifies 60s)
+sleep 8
 # Read INBOX.md if present
 INBOX=""
 if [ -f records/INBOX.md ]; then
@@ -693,7 +693,7 @@ echo "Checkpoint complete. Inbox: $INBOX" > output/result.md
     r_cp = run(f"timeout 10 tmux wait-for dobby_{HITL_T2_TASK}_checkpoint")
     if r_cp.returncode == 0:
         (t2_dir / "records" / "INBOX.md").write_text("[2026-02-26 10:00] Please use PostgreSQL instead of SQLite.\n")
-    r_t2 = run(f"timeout 15 tmux wait-for dobby_{HITL_T2_TASK}_done")
+    r_t2 = run(f"timeout 25 tmux wait-for dobby_{HITL_T2_TASK}_done")
     result_txt = ""
     result_path = t2_dir / "output" / "result.md"
     if result_path.exists():
@@ -758,12 +758,13 @@ for i in $(seq 1 10); do
     tmux wait-for -S dobby_{HITL_STOP_TASK}_question
     # Wait for answer (or short timeout)
     timeout 5 tmux wait-for dobby_{HITL_STOP_TASK}_answer || true
+    ANSWER=$(cat records/ANSWER.md 2>/dev/null || echo "no-answer-received")
     rm -f records/STOP records/QUESTION.md records/ANSWER.md
     break
   fi
   sleep 1
 done
-echo "STOP escalation test complete" > output/result.md
+echo "STOP escalation test complete. Answer: $ANSWER" > output/result.md
 """)
     stop_script.chmod(0o755)
     run(f"tmux new-session -d -s dobby-{HITL_STOP_TASK}")
@@ -776,13 +777,17 @@ echo "STOP escalation test complete" > output/result.md
     r_q = run(f"timeout 15 tmux wait-for dobby_{HITL_STOP_TASK}_question")
     question_md = stop_dir / "records" / "QUESTION.md"
     question_content = question_md.read_text() if question_md.exists() else ""
+    # Write answer so we can verify the agent reads it (round-trip test)
+    (stop_dir / "records" / "ANSWER.md").write_text("Resume work with modified scope.")
     # Signal answer so agent can exit cleanly
     run(f"tmux wait-for -S dobby_{HITL_STOP_TASK}_answer 2>/dev/null || true")
     run(f"timeout 10 tmux wait-for dobby_{HITL_STOP_TASK}_done")
+    stop_result = (stop_dir / "output" / "result.md").read_text() if (stop_dir / "output" / "result.md").exists() else ""
     stop_ok = (
         r_cp.returncode == 0        # checkpoint signal was received
         and r_q.returncode == 0     # agent escalated to Tier 3 (question signal fired)
         and "STOP" in question_content.upper()  # QUESTION.md mentions STOP
+        and "modified scope" in stop_result  # agent read ANSWER.md (full round-trip)
     )
     run(f"tmux kill-session -t dobby-{HITL_STOP_TASK} 2>/dev/null")
     results.append(("Tier 2 STOP escalation", stop_ok))

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-if __name__ == "__main__" or "notify" not in sys.modules:
+if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from notify.config import NotifyConfig, load_config
@@ -50,7 +50,7 @@ def format_slack_payload(event: NotifyEvent) -> dict:
             f"*Cost:* ${meta.get('cost', 0):.2f}",
             f"*Output:* `{meta.get('output_dir', 'N/A')}`",
         ]
-        if meta.get("duration_ms"):
+        if meta.get("duration_ms") is not None:
             mins = meta["duration_ms"] // 60000
             secs = (meta["duration_ms"] % 60000) // 1000
             fields.append(f"*Duration:* {mins}m {secs}s")
