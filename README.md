@@ -13,7 +13,7 @@
 [![Claude Code Skill](https://img.shields.io/badge/Claude%20Code-Skill-orange.svg)](https://docs.anthropic.com/en/docs/claude-code)
 [![Discord](https://img.shields.io/badge/Discord-bot-5865F2.svg?logo=discord&logoColor=white)](notify/adapters/discord.py)
 [![Slack](https://img.shields.io/badge/Slack-bot-4A154B.svg?logo=slack&logoColor=white)](notify/adapters/slack.py)
-[![Tests: 14/14](https://img.shields.io/badge/tests-14%2F14-brightgreen.svg)](smoke.py)
+[![Tests: 18/18](https://img.shields.io/badge/tests-18%2F18-brightgreen.svg)](smoke.py)
 
 Give it a task. Go do something else. It'll ask if it needs you.
 
@@ -22,7 +22,7 @@ Give it a task. Go do something else. It'll ask if it needs you.
 ## What it does
 
 - **Runs Claude agents in background tmux sessions** -- hand off a task and keep working.
-- **HITL relay** -- the agent can ask you a question mid-task, block until you answer, then continue.
+- **3-tier HITL** -- Tier 1: non-blocking decision logging. Tier 2: checkpoint at phase transitions (with async `/dobby tell` messaging and STOP escalation). Tier 3: hard-block for irreversible operations (question relay).
 - **Convergence loops** -- production agent builds, quality agent evaluates (blind, isolated), orchestrator decides: iterate or ship. Automated quality improvement with score tracking.
 - **Multi-agent teams** -- decompose multi-domain requests into subtasks, match to roster roles, launch agents in parallel.
 - **Dynamic agent growth** -- detects plateaus and bottlenecks, spawns advisory agents when stuck.
@@ -39,9 +39,13 @@ git clone https://github.com/zl190/dobby.git ~/.claude/skills/dobby
 
 That's it. The agent launches in a tmux session. You'll be notified when it finishes -- or when it has a question for you.
 
-## How the HITL relay works
+## How HITL works (3 tiers)
 
-This is the part that matters. When a background agent gets stuck on a decision it can't make alone, the relay kicks in:
+Agents choose the lightest tier that fits:
+
+- **Tier 1 (default):** Log the decision to `DECISIONS.md` and continue. Non-blocking. Used for routine choices.
+- **Tier 2 (checkpoint):** Signal at phase transitions. The orchestrator dispatches any queued `/dobby tell` messages via `INBOX.md`. If a `STOP` file exists, the agent escalates to Tier 3.
+- **Tier 3 (hard block):** Agent writes `QUESTION.md`, signals, and blocks until you answer. Used for credentials, deploys, or anything irreversible.
 
 ```
 Agent                          Orchestrator                   You
@@ -57,7 +61,7 @@ Agent                          Orchestrator                   You
   |   reads answer, continues      |                            |
 ```
 
-The agent does not poll. It does not guess. It waits for you, gets the answer, and keeps going.
+Send async messages to running agents: `/dobby tell <task> "use Redis instead"`. The agent picks it up at its next Tier 2 checkpoint. To request a graceful stop: `/dobby tell <task> STOP`.
 
 ## Commands
 
@@ -71,6 +75,8 @@ The agent does not poll. It does not guess. It waits for you, gets the answer, a
 | `/dobby notify` | Show notification config status |
 | `/dobby stop <task-name>` | Stop a running task |
 | `/dobby deliver <task-name>` | Read output and present results |
+| `/dobby tell <task> "msg"` | Send async message to a running agent (read at next checkpoint) |
+| `/dobby tell <task> STOP` | Request graceful stop (agent escalates to Tier 3) |
 | `/dobby roster` | Show project agent roster |
 | `/dobby roster init` | Create a starter roster config |
 
@@ -132,7 +138,7 @@ Total cost: $4.20 (3 production + 3 quality evaluations)
 ```
 ~/.claude/skills/dobby/
   SKILL.md          # The protocol -- routing, scaffolding, convergence, HITL, completion
-  smoke.py          # Tests (14 tests: bootstrap through bot completion)
+  smoke.py          # Tests (18 tests: bootstrap through STOP escalation)
   progress.py       # Live progress bar (filesystem phase detection)
   notify/           # Slack/Discord webhook notifications (zero dependencies)
   templates/        # VP architecture templates (research + company overlays)
@@ -191,7 +197,7 @@ Routing is lightweight by default. Quick questions get answered inline. Medium t
 
 ## What Dobby does differently
 
-A single skill file (~650 lines of protocol) that gives you:
+A single skill file (~700 lines of protocol) that gives you:
 - **HITL relay** -- background agents can block-wait for your input mid-task
 - **Automated convergence loops** -- produce → evaluate (blind) → fix → repeat until quality threshold
 - **Quality isolation** -- evaluation agents run in temp directories with no access to prior scores or vision
