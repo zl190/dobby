@@ -357,8 +357,10 @@ Start the progress watcher so the user sees live progress in this terminal:
 
 ```bash
 SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
-uv run "${SKILL_DIR}/progress.py" "${TASK_NAME}"
+uv run "${SKILL_DIR}/progress.py" "${TASK_NAME}" --stream
 ```
+
+**Important:** Use `--stream` flag when running from Claude Code. This outputs line-by-line updates instead of ANSI terminal refresh, which Claude Code can render.
 
 The progress bar updates every 5 seconds showing:
 - Phase completion (setup → records → work → deliverable)
