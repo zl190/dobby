@@ -128,7 +128,7 @@ For each subtask, launch in its own tmux session: `dobby-${SUBTASK}`
 Use the same launch command as single-agent Step 4, but with each subtask's TASK_DIR, MODEL, and BUDGET:
 ```bash
 tmux new-session -d -s "dobby-${SUBTASK}"
-tmux send-keys -t "dobby-${SUBTASK}" "cd $(pwd)/.dobby/${SUBTASK} && for attempt in 1 2 3; do claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${BUDGET} --output-format json ${MCP_FLAG} 'You are an autonomous agent. Read your CLAUDE.md. Do the work. Write all deliverables to output/. Update records/TODO.md with progress. If you need human help, follow the asking-for-help protocol in your CLAUDE.md. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${SUBTASK}_output.txt && break || sleep 15; done ; tmux wait-for -S dobby_${SUBTASK}_done" Enter
+tmux send-keys -t "dobby-${SUBTASK}" "cd $(pwd)/.dobby/${SUBTASK} && for attempt in 1 2 3; do claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${BUDGET} --output-format json 'You are an autonomous agent. Read your CLAUDE.md. Do the work. Write all deliverables to output/. Update records/TODO.md with progress. If you need human help, follow the asking-for-help protocol in your CLAUDE.md. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${SUBTASK}_output.txt && break || sleep 15; done ; tmux wait-for -S dobby_${SUBTASK}_done" Enter
 ```
 
 **Step 6: Update roster**
@@ -315,12 +315,6 @@ When the question listener fires:
 
 ### Step 4: Launch in tmux
 
-Before launching, check for MCP configs to pass through:
-```bash
-MCP_FLAG=""
-if [ -f .mcp.json ]; then MCP_FLAG="--mcp-config .mcp.json"; fi
-```
-
 ```bash
 TASK_NAME="<name>"
 TASK_DIR="$(pwd)/.dobby/${TASK_NAME}"
@@ -328,7 +322,7 @@ BUDGET="<budget>"             # from roster role, or determined in Step 1
 MODEL="claude-sonnet-4-6"     # from roster role, or default
 
 tmux new-session -d -s "dobby-${TASK_NAME}"
-tmux send-keys -t "dobby-${TASK_NAME}" "cd ${TASK_DIR} && for attempt in 1 2 3; do claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${BUDGET} --output-format json ${MCP_FLAG} 'You are an autonomous agent. Read your CLAUDE.md. Do the work. Write all deliverables to output/. Update records/TODO.md with progress. If you need human help, follow the asking-for-help protocol in your CLAUDE.md. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${TASK_NAME}_output.txt && break || sleep 15; done ; tmux wait-for -S dobby_${TASK_NAME}_done" Enter
+tmux send-keys -t "dobby-${TASK_NAME}" "cd ${TASK_DIR} && for attempt in 1 2 3; do claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${BUDGET} --output-format json 'You are an autonomous agent. Read your CLAUDE.md. Do the work. Write all deliverables to output/. Update records/TODO.md with progress. If you need human help, follow the asking-for-help protocol in your CLAUDE.md. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${TASK_NAME}_output.txt && break || sleep 15; done ; tmux wait-for -S dobby_${TASK_NAME}_done" Enter
 ```
 
 ### Step 5: Update Roster
@@ -404,7 +398,7 @@ while tmux wait-for dobby_${TASK_NAME}_prod_v${N}_question 2>/dev/null; do echo 
 Launch production agent (session name includes iteration to prevent collisions):
 ```bash
 tmux new-session -d -s "dobby-${TASK_NAME}-prod-v${N}"
-tmux send-keys -t "dobby-${TASK_NAME}-prod-v${N}" "cd ${TASK_DIR} && claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${ITER_BUDGET} --output-format json ${MCP_FLAG} 'You are a production agent. Read your CLAUDE.md. Build or improve the deliverable. Write to output/. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${TASK_NAME}_prod_v${N}.txt ; tmux wait-for -S dobby_${TASK_NAME}_prod_v${N}_done" Enter
+tmux send-keys -t "dobby-${TASK_NAME}-prod-v${N}" "cd ${TASK_DIR} && claude -p --model ${MODEL} --dangerously-skip-permissions --max-budget-usd ${ITER_BUDGET} --output-format json 'You are a production agent. Read your CLAUDE.md. Build or improve the deliverable. Write to output/. When complete, print COMPLETE.' 2>&1 | tee /tmp/dobby_${TASK_NAME}_prod_v${N}.txt ; tmux wait-for -S dobby_${TASK_NAME}_prod_v${N}_done" Enter
 ```
 
 Wait for completion. Handle HITL questions as usual (read QUESTION.md, relay to user, write ANSWER.md, signal back). When the completion listener fires, cancel the question listener:
@@ -697,3 +691,9 @@ Apply this expertise fully to the task below.
 - Use `;` between command and signal (fires even on failure). `&&` fires only on success.
 - Session names prefixed with `dobby-` to avoid conflicts
 - Use `uv run python` for scripts with dependencies
+
+## Limitations
+
+- **No MCP tools**: Dobby agents run without MCP server access (browser, memory, custom integrations). This is intentional — autonomous agents should have minimal external dependencies for reliability.
+- **Tasks requiring external integrations** (e.g., WeChat search, GitHub API via MCP) should use interactive Claude instead of Dobby.
+- **Rationale**: MCP adds startup overhead, failure points, and `claude -p --mcp-config` has known issues (see Claude Code #18791). Following OpenClaw's principle: "Autonomous systems should have minimal, predictable capability sets."
