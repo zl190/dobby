@@ -187,8 +187,60 @@ def render(task_name: str, task_dir: Path, pct: int, status: str, phases: list, 
     print()
 
 
-def watch(task_name: str, task_dir: Path, once: bool = False):
+def render_stream(task_name: str, pct: int, status: str, state: dict, start_time: float):
+    """Render a single line for streaming mode (no ANSI cursor movement)."""
+    elapsed = int(time.time() - start_time)
+    mins, secs = divmod(elapsed, 60)
+    timestamp = f"[{mins:02d}:{secs:02d}]"
+
+    # Simple ASCII progress bar
+    bar_width = 20
+    filled = int(bar_width * pct / 100)
+    empty = bar_width - filled
+    bar = "━" * filled + "░" * empty
+
+    # Cost info
+    cost_str = f"${state['cost']:.2f}" if state['cost'] else "$0.00"
+
+    # Current work item
+    work_item = ""
+    if state["todo_in_progress"]:
+        work_item = f" | {state['todo_in_progress'][0][:30]}"
+
+    # Output: [00:15] ━━━━━━░░░░░░░░ 45% | Working... | $0.50 | Building core...
+    print(f"{timestamp} {bar} {pct:3d}% | {status:<12} | {cost_str}{work_item}", flush=True)
+
+
+def watch(task_name: str, task_dir: Path, once: bool = False, stream: bool = False):
     """Watch loop — refresh every 5 seconds."""
+    start_time = time.time()
+
+    if stream:
+        # Stream mode: line-by-line output for Claude Code compatibility
+        print(f"⚡ Dobby: {task_name}", flush=True)
+        print("-" * 60, flush=True)
+        while True:
+            state = check_phase(task_dir)
+            pct, status, _ = determine_progress(state)
+            render_stream(task_name, pct, status, state, start_time)
+
+            if pct == 100:
+                print("-" * 60, flush=True)
+                if state["output_files"]:
+                    print(f"📦 Output: {', '.join(state['output_files'][:3])}", flush=True)
+                if state["cost"]:
+                    duration_s = state["duration"] / 1000 if state["duration"] else 0
+                    print(f"💰 Cost: ${state['cost']:.2f} | ⏱ {int(duration_s//60)}m {int(duration_s%60)}s", flush=True)
+                break
+
+            try:
+                time.sleep(5)
+            except KeyboardInterrupt:
+                print("\n[Detached - agent still running in tmux]", flush=True)
+                break
+        return
+
+    # Original mode: full TUI with ANSI codes
     if not once:
         print("\033[?1049h", end="")  # switch to alternate screen buffer
     try:
@@ -213,12 +265,15 @@ def watch(task_name: str, task_dir: Path, once: bool = False):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: progress.py <task-name> [--once]")
+        print("Usage: progress.py <task-name> [--once] [--stream]")
         print("  Watches .dobby/<task-name>/ for progress")
+        print("  --once    Show single snapshot, then exit")
+        print("  --stream  Line-by-line output (for Claude Code compatibility)")
         sys.exit(1)
 
     task_name = sys.argv[1]
     once = "--once" in sys.argv
+    stream = "--stream" in sys.argv
 
     # Try to find the task directory
     task_dir = Path(f".dobby/{task_name}")
@@ -230,4 +285,4 @@ if __name__ == "__main__":
         print(f"Task folder not found: .dobby/{task_name}/")
         sys.exit(1)
 
-    watch(task_name, task_dir, once=once)
+    watch(task_name, task_dir, once=once, stream=stream)

@@ -10,7 +10,8 @@ Dobby is a free elf. Give Dobby a task and Dobby works on it autonomously in the
 ## Usage
 
 ```bash
-/dobby <request>                     # Give Dobby a task
+/dobby <request>                     # Give Dobby a task (shows live progress bar)
+/dobby --quiet <request>             # Fire-and-forget (no progress bar)
 /dobby --role <slug> <request>       # Give Dobby a task with a specific roster role
 /dobby --converge <request>          # Run with convergence loop (build → evaluate → fix)
 /dobby status                        # Show all tasks and progress
@@ -182,7 +183,9 @@ If classification is **Multi-domain**: follow the Multi-Domain Orchestration pro
 - Request contains quality signals: "iterate", "converge", "review loop", "quality gate", "keep improving", "until it's good"
 - Budget is $20+ (substantial tasks benefit from iteration)
 
-If convergence is enabled, follow Steps 2-6 below for initial launch, then the Convergence Loop protocol kicks in after the first completion.
+If convergence is enabled, follow Steps 2-7 below for initial launch, then the Convergence Loop protocol kicks in after the first completion.
+
+**Quiet mode detection:** If user passed `--quiet` flag, skip Step 7 (auto-watch). Task launches fire-and-forget style.
 
 If `.dobby/roster-config.md` exists, run Roster-Aware Routing now and set `MODEL` and `BUDGET` from the matched role. Otherwise use defaults.
 
@@ -345,9 +348,35 @@ Tell the user:
 ```
 Dobby is on it: {task-name}
 Budget: ${BUDGET} | Output: .dobby/{task-name}/output/
+Watching progress (Ctrl+C to detach, agent keeps running)...
 ```
 
-That's it. Short and minimal. The user will be notified when the task completes.
+### Step 7: Auto-watch
+
+Start the progress watcher so the user sees live progress in this terminal:
+
+```bash
+SKILL_DIR="$(readlink -f ~/.claude/skills/dobby 2>/dev/null || echo ~/.claude/skills/dobby)"
+uv run "${SKILL_DIR}/progress.py" "${TASK_NAME}" --stream
+```
+
+**Important:** Use `--stream` flag when running from Claude Code. This outputs line-by-line updates instead of ANSI terminal refresh, which Claude Code can render.
+
+The progress bar updates every 5 seconds showing:
+- Phase completion (setup → records → work → deliverable)
+- In-progress items from TODO.md
+- Output files with sizes
+- Cost and duration
+
+**User can Ctrl+C anytime** — the agent keeps running in tmux. They can:
+- Re-attach with `/dobby progress {task-name}`
+- Check status with `/dobby status`
+- The completion listener will still notify when done
+
+For fire-and-forget (skip auto-watch), user can pass `--quiet`:
+```
+/dobby --quiet build X
+```
 
 ## Task Completion
 
